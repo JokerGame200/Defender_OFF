@@ -31,7 +31,7 @@ try {
     $useSQLite = $true
     Write-Verbose "SQLite-Unterstützung aktiviert"
 } catch {
-    Write-Verbose "SQLite-Bibliothek nicht verfügunde, Firefox History wird eingeschränkt unterstützt"
+    Write-Verbose "SQLite-Bibliothek nicht verfügbar, Firefox History wird eingeschränkt unterstützt"
 }
 
 # ==============================================
@@ -220,7 +220,7 @@ function Parse-BrowserData {
             { $_ -in 'chrome', 'edge', 'opera' } {
                 if ($DataType -eq 'history') {
                     # Verbesserte URL-Erkennung
-                    $urlPattern = 'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s"\'<>]*'
+                    $urlPattern = 'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s"''<>]*'
                     $matches = [regex]::Matches($Content, $urlPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
                     
                     foreach ($match in $matches) {
@@ -246,7 +246,7 @@ function Parse-BrowserData {
                     }
                     catch {
                         # Fallback: Regex für Bookmarks
-                        $urlPattern = '"url"\s*:\s*"([^"]+)"'
+                        $urlPattern = '"url"\s*:\s*"([^""]+)"'
                         $matches = [regex]::Matches($Content, $urlPattern)
                         
                         foreach ($match in $matches) {
@@ -271,7 +271,7 @@ function Parse-BrowserData {
                 }
                 elseif ($DataType -eq 'bookmarks') {
                     # Firefox Bookmarks JSON
-                    $urlPattern = '"uri"\s*:\s*"([^"]+)"'
+                    $urlPattern = '"uri"\s*:\s*"([^""]+)"'
                     $matches = [regex]::Matches($Content, $urlPattern)
                     
                     foreach ($match in $matches) {
@@ -322,7 +322,10 @@ function Extract-Bookmarks {
 }
 
 function Parse-FirefoxHistory {
-    param([string]$Content, [string]$SourcePath)
+    param(
+        [string]$Content,
+        [string]$SourcePath
+    )
     
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
     
